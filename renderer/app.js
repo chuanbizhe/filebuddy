@@ -6,6 +6,7 @@ const BUILTIN_API_BASE = window.filebuddy.getApiBase();
 let apiBase = BUILTIN_API_BASE;
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c])); }
+function formatBytes(value) { const bytes = Number(value || 0); if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
 function permissionText(value) { return value === 'read_only' ? '只读' : '读写'; }
 async function api(path, options = {}) {
   const response = await fetch(`${apiBase.replace(/\/$/, '')}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}), ...(options.headers || {}) } });
@@ -34,8 +35,9 @@ function connectionHtml(connection) {
 }
 function showDetail(id) {
   const item = workspaces.find((entry) => entry.id === id); if (!item) return;
+  const stats = item.stats || { requests: 0, bytesUp: 0, bytesDown: 0 };
   $('#listView').classList.add('hidden'); $('#detailView').classList.remove('hidden');
-  $('#detailView').innerHTML = `<div class="detail-card card"><button class="back" id="backButton">← 返回项目</button><div class="detail-header"><div><div class="status"><i></i>当前设备在线</div><h2>${escapeHtml(item.name)}</h2><div class="detail-path">${escapeHtml(item.folder)}</div></div><span class="tag">${permissionText(item.permission)}</span></div><div class="copy-card"><h3>把这个项目交给 AI</h3><p>连接地址和 Key 与当前 Workspace 权限绑定。</p>${connectionHtml(item.connection)}</div><div class="detail-stats"><div class="stat"><small>连接方式</small><strong>直连优先</strong></div><div class="stat"><small>删除权限</small><strong>${item.allowDelete ? '已开启' : '已关闭'}</strong></div><div class="stat"><small>登录账号</small><strong>${escapeHtml(localStorage.getItem('filebuddy_email') || '已鉴权')}</strong></div></div><div class="detail-actions"><button class="secondary" id="openButton">打开文件夹</button><button class="secondary danger" id="removeButton">移除项目</button></div></div>`;
+  $('#detailView').innerHTML = `<div class="detail-card card"><button class="back" id="backButton">← 返回项目</button><div class="detail-header"><div><div class="status"><i></i>当前设备在线</div><h2>${escapeHtml(item.name)}</h2><div class="detail-path">${escapeHtml(item.folder)}</div></div><span class="tag">${permissionText(item.permission)}</span></div><div class="copy-card"><h3>把这个项目交给 AI</h3><p>连接地址和 Key 与当前 Workspace 权限绑定。</p>${connectionHtml(item.connection)}</div><div class="detail-stats"><div class="stat"><small>当前连接</small><strong>${item.online ? '1 个设备' : '0 个设备'}</strong></div><div class="stat"><small>已处理请求</small><strong>${stats.requests}</strong></div><div class="stat"><small>流量（上行 / 下行）</small><strong>${formatBytes(stats.bytesUp)} / ${formatBytes(stats.bytesDown)}</strong></div></div><div class="detail-actions"><button class="secondary" id="openButton">打开文件夹</button><button class="secondary danger" id="removeButton">移除项目</button></div></div>`;
   $('#backButton').addEventListener('click', () => { $('#detailView').classList.add('hidden'); $('#listView').classList.remove('hidden'); });
   $('#openButton').addEventListener('click', () => window.filebuddy.openFolder(item.folder));
   $('#removeButton').addEventListener('click', async () => { if (confirm('只移除项目记录，不会删除本地文件。继续吗？')) { workspaces = await window.filebuddy.removeWorkspace(item.id); $('#backButton').click(); renderList(); } });

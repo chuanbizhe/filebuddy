@@ -17,6 +17,13 @@ async function writeWorkspaces(items) {
   await fs.writeFile(storePath(), JSON.stringify(items, null, 2), 'utf8');
 }
 
+async function updateStats(itemId, delta) {
+  const items = await readWorkspaces(); const item = items.find(entry => entry.id === itemId);
+  if (!item) return;
+  item.stats = { requests: 0, bytesUp: 0, bytesDown: 0, ...item.stats, ...delta };
+  await writeWorkspaces(items);
+}
+
 function startBridge(item) {
   if (!item.remoteId || !item.connection?.apiKey || bridgeLoops.has(item.id)) return;
   let stopped = false;
@@ -27,10 +34,16 @@ function startBridge(item) {
         const response = await fetch(`${apiBase()}/v1/bridge/${encodeURIComponent(item.remoteId)}/poll`, { headers: { 'X-FileBuddy-Key': item.connection.apiKey } });
         const data = await response.json();
         if (data.request) {
+          const requestBytes = Buffer.byteLength(JSON.stringify(data.request.payload || {}), 'utf8');
+          const current = (await readWorkspaces()).find(entry => entry.id === item.id)?.stats || {};
+          await updateStats(item.id, { requests: Number(current.requests || 0) + 1, bytesUp: Number(current.bytesUp || 0) + requestBytes, lastActivityAt: new Date().toISOString() });
           let result;
           try { result = { jsonrpc: '2.0', id: data.request.payload.id ?? null, result: await handleRequest(item, data.request.payload) }; }
           catch (error) { result = { jsonrpc: '2.0', id: data.request.payload.id ?? null, error: { code: -32000, message: error.message || 'local_bridge_error' } }; }
-          await fetch(`${apiBase()}/v1/bridge/${encodeURIComponent(item.remoteId)}/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-FileBuddy-Key': item.connection.apiKey }, body: JSON.stringify({ requestId: data.request.id, response: result }) });
+          const responseBody = JSON.stringify({ requestId: data.request.id, response: result });
+          await fetch(`${apiBase()}/v1/bridge/${encodeURIComponent(item.remoteId)}/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-FileBuddy-Key': item.connection.apiKey }, body: responseBody });
+          const updated = (await readWorkspaces()).find(entry => entry.id === item.id)?.stats || {};
+          await updateStats(item.id, { bytesDown: Number(updated.bytesDown || 0) + Buffer.byteLength(responseBody, 'utf8') });
         }
       } catch {}
       await new Promise(resolve => setTimeout(resolve, 700));
@@ -49,6 +62,7 @@ function createWindow() {
 }
 
 ipcMain.handle('workspace:list', async () => { const items = await readWorkspaces(); items.forEach(startBridge); return items; });
+ipcMain.handle('workspace:stats', async (_event, id) => ((await readWorkspaces()).find(item => item.id === id)?.stats) || { requests: 0, bytesUp: 0, bytesDown: 0 });
 ipcMain.handle('workspace:choose-folder', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
   return result.canceled ? null : result.filePaths[0];
@@ -58,7 +72,7 @@ ipcMain.handle('workspace:create', async (_event, input) => {
   const stat = await fs.stat(folder);
   if (!stat.isDirectory()) throw new Error('选择的路径不是文件夹');
   const items = await readWorkspaces();
-  const item = { id: `ws_${Date.now().toString(36)}`, name: String(input.name || path.basename(folder)), folder, permission: input.permission === 'read_only' ? 'read_only' : 'read_write', allowDelete: Boolean(input.allowDelete), createdAt: new Date().toISOString(), online: true };
+  const item = { id: `ws_${Date.now().toString(36)}`, name: String(input.name || path.basename(folder)), folder, permission: input.permission === 'read_only' ? 'read_only' : 'read_write', allowDelete: Boolean(input.allowDelete), createdAt: new Date().toISOString(), online: true, stats: { requests: 0, bytesUp: 0, bytesDown: 0 } };
   items.push(item); await writeWorkspaces(items); return item;
 });
 ipcMain.handle('workspace:update', async (_event, input) => {
