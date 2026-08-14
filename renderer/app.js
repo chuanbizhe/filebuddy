@@ -2,7 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 let workspaces = [];
 let authMode = 'login_password';
 let authToken = localStorage.getItem('filebuddy_token') || '';
-let apiBase = localStorage.getItem('filebuddy_api') || window.filebuddy.getApiBase();
+const BUILTIN_API_BASE = window.filebuddy.getApiBase();
+let apiBase = BUILTIN_API_BASE;
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c])); }
 function permissionText(value) { return value === 'read_only' ? '只读' : '读写'; }
@@ -12,7 +13,7 @@ async function api(path, options = {}) {
   if (!response.ok) throw new Error(data.error || `请求失败（${response.status}）`);
   return data;
 }
-function setAuth(token, base) { authToken = token; apiBase = base.replace(/\/$/, ''); localStorage.setItem('filebuddy_token', token); localStorage.setItem('filebuddy_api', apiBase); }
+function setAuth(token) { authToken = token; apiBase = BUILTIN_API_BASE; localStorage.setItem('filebuddy_token', token); }
 function showAuth() { $('#authDialog').showModal(); }
 function renderList() {
   $('#projectCount').textContent = workspaces.length ? `${workspaces.length} 个项目` : '';

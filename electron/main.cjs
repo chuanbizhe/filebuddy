@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, Menu } = require('electron');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 
@@ -17,6 +17,7 @@ async function writeWorkspaces(items) {
 function createWindow() {
   const win = new BrowserWindow({
     width: 1180, height: 780, minWidth: 900, minHeight: 620,
+    title: '文小哥 FileBuddy',
     backgroundColor: '#f7f7f5',
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false }
   });
@@ -50,5 +51,5 @@ ipcMain.handle('workspace:remove', async (_event, id) => {
 });
 ipcMain.handle('workspace:open-folder', async (_event, folder) => { await shell.openPath(folder); return true; });
 
-app.whenReady().then(() => { createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
+app.whenReady().then(() => { Menu.setApplicationMenu(null); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
