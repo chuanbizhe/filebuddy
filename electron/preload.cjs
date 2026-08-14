@@ -1,7 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('filebuddy', {
-  getApiBase: () => process.env.FILEBUDDY_API_URL || 'http://filebuddy.elo.ink/index.php',
+  getApiBase: () => process.env.FILEBUDDY_API_URL || 'https://filebuddy.elo.ink/index.php',
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
   chooseFolder: () => ipcRenderer.invoke('workspace:choose-folder'),
   createWorkspace: (input) => ipcRenderer.invoke('workspace:create', input),

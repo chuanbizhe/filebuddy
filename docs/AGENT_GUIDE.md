@@ -81,7 +81,7 @@ GET  /mcp/<id>                X-FileBuddy-Key: <key>
 ## 正确请求示例
 
 ```bash
-BASE='http://filebuddy.elo.ink/index.php'
+BASE='https://filebuddy.elo.ink/index.php'
 TOKEN=$(curl -sS -X POST "$BASE/v1/auth/login" \
   -H 'Content-Type: application/json' \
   -d '{"phone":"13800138000","password":"your-password"}' | jq -r .token)

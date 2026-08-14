@@ -97,7 +97,7 @@ X-FileBuddy-Key: <Workspace API Key>
 下面是一个完整的最小示例。请把手机号、密码和验证码替换成用户真实输入，不要把 API Key 写入代码仓库：
 
 ```bash
-BASE='http://filebuddy.elo.ink/index.php'
+BASE='https://filebuddy.elo.ink/index.php'
 
 # 1. 登录
 TOKEN=$(curl -sS -X POST "$BASE/v1/auth/login" \
