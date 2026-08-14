@@ -272,7 +272,7 @@ if ($method === 'GET' && $path === '/health') {
     $json(['ok' => true, 'service' => 'filebuddy-api', 'php' => PHP_VERSION, 'time' => gmdate('c')]);
 }
 if ($method === 'GET' && $path === '/v1/config') {
-    $json(['relayThresholdBytes' => (int)($_ENV['RELAY_THRESHOLD_BYTES'] ?? getenv('RELAY_THRESHOLD_BYTES') ?: 5242880), 'protocolVersion' => 1]);
+    $json(['relayThresholdBytes' => (int)($_ENV['RELAY_THRESHOLD_BYTES'] ?? getenv('RELAY_THRESHOLD_BYTES') ?: 5242880), 'protocolVersion' => 1, 'smsConfigured' => (new TencentSmsService())->configured()]);
 }
 if ($method === 'POST' && $path === '/v1/sessions') {
     $body = json_decode(file_get_contents('php://input') ?: '{}', true);
