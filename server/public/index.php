@@ -52,6 +52,7 @@ function filebuddyDb(): PDO
     $pdo->exec('CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, public_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, permission TEXT NOT NULL, allow_delete INTEGER NOT NULL DEFAULT 0, device_status TEXT NOT NULL DEFAULT "online", created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS connection_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL, key_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS bridge_requests (id TEXT PRIMARY KEY, workspace_id INTEGER NOT NULL, payload TEXT NOT NULL, response TEXT NULL, status TEXT NOT NULL DEFAULT "pending", created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS sms_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, sent_at TEXT NOT NULL, UNIQUE(phone, purpose))');
     return $pdo;
 }
@@ -106,6 +107,15 @@ function filebuddyVerifySms(PDO $pdo, string $phone, string $code, string $purpo
     }
     if ($consume) $pdo->prepare('DELETE FROM sms_verifications WHERE id = ?')->execute([(int)$record['id']]);
     return true;
+}
+
+function filebuddyConnectionWorkspace(PDO $pdo, string $publicId): ?array
+{
+    $key = (string)($_SERVER['HTTP_X_FILEBUDDY_KEY'] ?? '');
+    if ($key === '' && preg_match('/^Bearer\s+(.+)$/i', $_SERVER['HTTP_AUTHORIZATION'] ?? '', $matches)) $key = $matches[1];
+    $statement = $pdo->prepare('SELECT workspaces.* FROM connection_keys JOIN workspaces ON workspaces.id = connection_keys.workspace_id WHERE workspaces.public_id = ? AND connection_keys.key_hash = ? AND connection_keys.revoked_at IS NULL');
+    $statement->execute([$publicId, hash('sha256', $key)]);
+    return $statement->fetch() ?: null;
 }
 
 if ($method === 'GET' && $path === '/') {
@@ -255,12 +265,48 @@ if ($method === 'POST' && preg_match('#^/v1/workspaces/([^/]+)/connections$#', $
     $permissionText = $workspace['permission'] === 'read_only' ? '只读' : '读写';
     $json(['workspaceId' => $workspace['public_id'], 'mcpUrl' => $mcpUrl, 'apiUrl' => $apiUrl, 'apiKey' => $apiKey, 'agentPrompt' => "你可以通过 FileBuddy 访问项目 {$workspace['name']}。MCP: {$mcpUrl}；API: {$apiUrl}；API Key: {$apiKey}。当前权限：{$permissionText}。仅访问 /workspace 下路径，修改前读取最新版本。"], 201);
 }
+if ($method === 'GET' && preg_match('#^/v1/bridge/([^/]+)/poll$#', $path, $matches)) {
+    $workspace = filebuddyConnectionWorkspace($pdo, $matches[1]);
+    if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
+    $statement = $pdo->prepare('SELECT id, payload FROM bridge_requests WHERE workspace_id = ? AND status = "pending" ORDER BY created_at ASC LIMIT 1');
+    $statement->execute([(int)$workspace['id']]);
+    $request = $statement->fetch();
+    $json(['request' => $request ? ['id' => $request['id'], 'payload' => json_decode($request['payload'], true)] : null]);
+}
+if ($method === 'POST' && preg_match('#^/v1/bridge/([^/]+)/respond$#', $path, $matches)) {
+    $workspace = filebuddyConnectionWorkspace($pdo, $matches[1]);
+    if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
+    $body = filebuddyBody();
+    $response = json_encode($body['response'] ?? ['error' => 'empty_response'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $statement = $pdo->prepare('UPDATE bridge_requests SET response = ?, status = "completed", updated_at = ? WHERE id = ? AND workspace_id = ? AND status = "pending"');
+    $statement->execute([$response, gmdate('c'), (string)($body['requestId'] ?? ''), (int)$workspace['id']]);
+    $json(['ok' => $statement->rowCount() > 0]);
+}
+if ($method === 'POST' && preg_match('#^/mcp/([^/]+)$#', $path, $matches)) {
+    $workspace = filebuddyConnectionWorkspace($pdo, $matches[1]);
+    if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
+    $payload = filebuddyBody();
+    if (!isset($payload['method'])) $json(['error' => 'invalid_mcp_request', 'hint' => '请求必须包含 JSON-RPC method'], 422);
+    if (in_array($payload['method'], ['initialize', 'tools/list'], true)) {
+        $json(['jsonrpc' => '2.0', 'id' => $payload['id'] ?? null, 'result' => $payload['method'] === 'initialize' ? ['protocolVersion' => '2025-03-26', 'capabilities' => ['tools' => new stdClass()], 'serverInfo' => ['name' => 'filebuddy', 'version' => '0.1.1']] : ['tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_text', 'write_file']]]);
+    }
+    $requestId = 'req_' . bin2hex(random_bytes(12));
+    $now = gmdate('c');
+    $statement = $pdo->prepare('INSERT INTO bridge_requests (id, workspace_id, payload, status, created_at, updated_at) VALUES (?, ?, ?, "pending", ?, ?)');
+    $statement->execute([$requestId, (int)$workspace['id'], json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES), $now, $now]);
+    for ($i = 0; $i < 80; $i++) {
+        usleep(250000);
+        $check = $pdo->prepare('SELECT response FROM bridge_requests WHERE id = ? AND workspace_id = ?');
+        $check->execute([$requestId, (int)$workspace['id']]);
+        $response = $check->fetchColumn();
+        if ($response !== false && $response !== null) {
+            $json(json_decode($response, true) ?: ['jsonrpc' => '2.0', 'id' => $payload['id'] ?? null, 'result' => []]);
+        }
+    }
+    $json(['jsonrpc' => '2.0', 'id' => $payload['id'] ?? null, 'error' => ['code' => -32001, 'message' => '本地客户端暂时离线，请确认 FileBuddy 正在运行后重试']], 504);
+}
 if ($method === 'GET' && preg_match('#^/v1/bridge/([^/]+)$#', $path, $matches)) {
-    $key = (string)($_SERVER['HTTP_X_FILEBUDDY_KEY'] ?? '');
-    if ($key === '' && preg_match('/^Bearer\s+(.+)$/i', $_SERVER['HTTP_AUTHORIZATION'] ?? '', $authMatches)) $key = $authMatches[1];
-    $statement = $pdo->prepare('SELECT workspaces.* FROM connection_keys JOIN workspaces ON workspaces.id = connection_keys.workspace_id WHERE workspaces.public_id = ? AND connection_keys.key_hash = ? AND connection_keys.revoked_at IS NULL');
-    $statement->execute([$matches[1], hash('sha256', $key)]);
-    $workspace = $statement->fetch();
+    $workspace = filebuddyConnectionWorkspace($pdo, $matches[1]);
     if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
     $json(['name' => $workspace['name'], 'workspace' => '/workspace', 'permission' => $workspace['permission'], 'tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_files', 'search_text', 'create_file', 'write_file', 'apply_patch', 'rename_file', 'move_file', 'copy_file', 'delete_file']]);
 }
