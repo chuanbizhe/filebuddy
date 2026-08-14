@@ -49,6 +49,10 @@ PK\x03\x04...
 
 ## Agent 行为建议
 
+## 当前客户端实现
+
+客户端已内置轻量 Office 文本提取：`.docx` 读取 `word/document.xml`，`.xlsx` 读取共享字符串与工作表 XML，`.pptx` 读取幻灯片 XML；返回 `contentType: office-text`。单文件直接读取上限为 50 MB，超过上限请使用分段读取或 OSS 临时传输。`elooffice` 当前仓库仅包含规划文档，没有可直接复用的解析引擎代码，因此未引入未经验证的外部二进制依赖。
+
 当用户要求查看 Word、Excel 或 PowerPoint 内容时：
 
 1. 先确认文件扩展名和大小。
