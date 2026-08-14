@@ -1,6 +1,14 @@
 <?php
 declare(strict_types=1);
 
+$localConfigCandidates = [__DIR__ . '/config.local.php', dirname(__DIR__) . '/config.local.php'];
+foreach ($localConfigCandidates as $localConfig) {
+    if (@is_file($localConfig)) {
+        require_once $localConfig;
+        break;
+    }
+}
+
 $servicePath = __DIR__ . '/src/TencentSmsService.php';
 if (!is_file($servicePath)) {
     // Conventional deployments keep src beside public.
@@ -102,6 +110,10 @@ function filebuddyVerifySms(PDO $pdo, string $phone, string $code, string $purpo
 
 if ($method === 'GET' && $path === '/') {
     header('Content-Type: text/html; charset=utf-8');
+    if (is_file(__DIR__ . '/home.html')) {
+        readfile(__DIR__ . '/home.html');
+        exit;
+    }
     echo <<<'HTML'
 <!doctype html>
 <html lang="zh-CN"><head>

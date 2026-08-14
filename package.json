@@ -24,8 +24,10 @@
     "files": [
       "electron/**/*",
       "renderer/**/*",
-      "package.json"
+      "package.json",
+      "assets/**/*"
     ],
+    "icon": "assets/filebuddy-icon.png",
     "win": {
       "target": [
         "nsis",
