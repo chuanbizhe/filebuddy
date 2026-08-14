@@ -10,6 +10,56 @@ if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') { http_response_code(20
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
+function filebuddyEnv(string $name, string $fallback = ''): string
+{
+    $value = $_ENV[$name] ?? getenv($name);
+    return ($value === false || $value === null || $value === '') ? $fallback : (string)$value;
+}
+
+function filebuddyDb(): PDO
+{
+    static $pdo = null;
+    if ($pdo instanceof PDO) return $pdo;
+    $dbPath = filebuddyEnv('DB_PATH', dirname(__DIR__) . '/data/filebuddy.sqlite');
+    $directory = dirname($dbPath);
+    if (!is_dir($directory)) mkdir($directory, 0700, true);
+    $pdo = new PDO('sqlite:' . $dbPath, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+    $pdo->exec('PRAGMA foreign_keys = ON');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, public_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, permission TEXT NOT NULL, allow_delete INTEGER NOT NULL DEFAULT 0, device_status TEXT NOT NULL DEFAULT "online", created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS connection_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL, key_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)');
+    return $pdo;
+}
+
+function filebuddyBody(): array
+{
+    $body = json_decode(file_get_contents('php://input') ?: '{}', true);
+    return is_array($body) ? $body : [];
+}
+
+function filebuddyToken(PDO $pdo, int $userId): string
+{
+    $token = 'fbt_' . bin2hex(random_bytes(32));
+    $statement = $pdo->prepare('INSERT INTO tokens (user_id, token_hash, expires_at, created_at) VALUES (?, ?, ?, ?)');
+    $statement->execute([$userId, hash('sha256', $token), gmdate('c', time() + 86400 * 30), gmdate('c')]);
+    return $token;
+}
+
+function filebuddyAuth(PDO $pdo): ?array
+{
+    $header = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+    if (!preg_match('/^Bearer\s+(.+)$/i', $header, $matches)) return null;
+    $statement = $pdo->prepare('SELECT users.* FROM tokens JOIN users ON users.id = tokens.user_id WHERE tokens.token_hash = ? AND tokens.expires_at > ?');
+    $statement->execute([hash('sha256', trim($matches[1])), gmdate('c')]);
+    return $statement->fetch() ?: null;
+}
+
+function filebuddyPublicBase(): string
+{
+    return rtrim(filebuddyEnv('PUBLIC_BASE_URL', 'http://127.0.0.1:8080'), '/');
+}
+
 if ($method === 'GET' && $path === '/') {
     header('Content-Type: text/html; charset=utf-8');
     echo <<<'HTML'
@@ -39,6 +89,84 @@ $json = static function (array $payload, int $status = 200): never {
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 };
+
+$pdo = filebuddyDb();
+
+if ($method === 'POST' && $path === '/v1/auth/register') {
+    $body = filebuddyBody();
+    $email = strtolower(trim((string)($body['email'] ?? '')));
+    $password = (string)($body['password'] ?? '');
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) $json(['error' => 'valid email and password (8+ chars) are required'], 422);
+    try {
+        $statement = $pdo->prepare('INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)');
+        $statement->execute([$email, password_hash($password, PASSWORD_DEFAULT), gmdate('c')]);
+    } catch (PDOException $exception) {
+        if ($exception->getCode() === '23000') $json(['error' => 'email_already_registered'], 409);
+        throw $exception;
+    }
+    $userId = (int)$pdo->lastInsertId();
+    $json(['user' => ['id' => $userId, 'email' => $email], 'token' => filebuddyToken($pdo, $userId)]);
+}
+if ($method === 'POST' && $path === '/v1/auth/login') {
+    $body = filebuddyBody();
+    $statement = $pdo->prepare('SELECT * FROM users WHERE email = ?');
+    $statement->execute([strtolower(trim((string)($body['email'] ?? '')))]);
+    $user = $statement->fetch();
+    if (!$user || !password_verify((string)($body['password'] ?? ''), $user['password_hash'])) $json(['error' => 'invalid_credentials'], 401);
+    $json(['user' => ['id' => (int)$user['id'], 'email' => $user['email']], 'token' => filebuddyToken($pdo, (int)$user['id'])]);
+}
+if ($method === 'GET' && $path === '/v1/me') {
+    $user = filebuddyAuth($pdo);
+    if (!$user) $json(['error' => 'unauthorized'], 401);
+    $json(['id' => (int)$user['id'], 'email' => $user['email']]);
+}
+if ($method === 'GET' && $path === '/v1/workspaces') {
+    $user = filebuddyAuth($pdo);
+    if (!$user) $json(['error' => 'unauthorized'], 401);
+    $statement = $pdo->prepare('SELECT public_id, name, permission, allow_delete, device_status, created_at FROM workspaces WHERE user_id = ? ORDER BY id DESC');
+    $statement->execute([(int)$user['id']]);
+    $json(['workspaces' => array_map(static fn(array $item): array => ['id' => $item['public_id'], 'name' => $item['name'], 'permission' => $item['permission'], 'allowDelete' => (bool)$item['allow_delete'], 'online' => $item['device_status'] === 'online', 'createdAt' => $item['created_at']], $statement->fetchAll())]);
+}
+if ($method === 'POST' && $path === '/v1/workspaces') {
+    $user = filebuddyAuth($pdo);
+    if (!$user) $json(['error' => 'unauthorized'], 401);
+    $body = filebuddyBody();
+    $name = trim((string)($body['name'] ?? ''));
+    $permission = ($body['permission'] ?? 'read_write') === 'read_only' ? 'read_only' : 'read_write';
+    if ($name === '') $json(['error' => 'name is required'], 422);
+    $publicId = 'ws_' . bin2hex(random_bytes(12));
+    $statement = $pdo->prepare('INSERT INTO workspaces (user_id, public_id, name, permission, allow_delete, created_at) VALUES (?, ?, ?, ?, ?, ?)');
+    $statement->execute([(int)$user['id'], $publicId, $name, $permission, !empty($body['allowDelete']) ? 1 : 0, gmdate('c')]);
+    $json(['id' => $publicId, 'name' => $name, 'permission' => $permission, 'allowDelete' => !empty($body['allowDelete']), 'online' => true], 201);
+}
+if ($method === 'POST' && preg_match('#^/v1/workspaces/([^/]+)/connections$#', $path, $matches)) {
+    $user = filebuddyAuth($pdo);
+    if (!$user) $json(['error' => 'unauthorized'], 401);
+    $statement = $pdo->prepare('SELECT * FROM workspaces WHERE public_id = ? AND user_id = ?');
+    $statement->execute([$matches[1], (int)$user['id']]);
+    $workspace = $statement->fetch();
+    if (!$workspace) $json(['error' => 'workspace_not_found'], 404);
+    $apiKey = 'fbk_' . bin2hex(random_bytes(24));
+    $statement = $pdo->prepare('INSERT INTO connection_keys (workspace_id, key_hash, created_at) VALUES (?, ?, ?)');
+    $statement->execute([(int)$workspace['id'], hash('sha256', $apiKey), gmdate('c')]);
+    $base = filebuddyPublicBase();
+    $mcpUrl = $base . '/mcp/' . rawurlencode($workspace['public_id']);
+    $apiUrl = $base . '/v1/bridge/' . rawurlencode($workspace['public_id']);
+    $permissionText = $workspace['permission'] === 'read_only' ? '只读' : '读写';
+    $json(['workspaceId' => $workspace['public_id'], 'mcpUrl' => $mcpUrl, 'apiUrl' => $apiUrl, 'apiKey' => $apiKey, 'agentPrompt' => "你可以通过 FileBuddy 访问项目 {$workspace['name']}。MCP: {$mcpUrl}；API: {$apiUrl}；API Key: {$apiKey}。当前权限：{$permissionText}。仅访问 /workspace 下路径，修改前读取最新版本。"], 201);
+}
+if ($method === 'GET' && preg_match('#^/v1/bridge/([^/]+)$#', $path, $matches)) {
+    $key = (string)($_SERVER['HTTP_X_FILEBUDDY_KEY'] ?? '');
+    if ($key === '' && preg_match('/^Bearer\s+(.+)$/i', $_SERVER['HTTP_AUTHORIZATION'] ?? '', $authMatches)) $key = $authMatches[1];
+    $statement = $pdo->prepare('SELECT workspaces.* FROM connection_keys JOIN workspaces ON workspaces.id = connection_keys.workspace_id WHERE workspaces.public_id = ? AND connection_keys.key_hash = ? AND connection_keys.revoked_at IS NULL');
+    $statement->execute([$matches[1], hash('sha256', $key)]);
+    $workspace = $statement->fetch();
+    if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
+    $json(['name' => $workspace['name'], 'workspace' => '/workspace', 'permission' => $workspace['permission'], 'tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_files', 'search_text', 'create_file', 'write_file', 'apply_patch', 'rename_file', 'move_file', 'copy_file', 'delete_file']]);
+}
+if ($method === 'GET' && preg_match('#^/mcp/([^/]+)$#', $path, $matches)) {
+    $json(['name' => 'filebuddy', 'workspaceId' => $matches[1], 'transport' => 'streamable-http', 'authentication' => 'X-FileBuddy-Key', 'message' => 'Use the generated connection key to open this Workspace.']);
+}
 
 if ($method === 'GET' && $path === '/health') {
     $json(['ok' => true, 'service' => 'filebuddy-api', 'php' => PHP_VERSION, 'time' => gmdate('c')]);

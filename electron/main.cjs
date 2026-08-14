@@ -36,6 +36,14 @@ ipcMain.handle('workspace:create', async (_event, input) => {
   const item = { id: `ws_${Date.now().toString(36)}`, name: String(input.name || path.basename(folder)), folder, permission: input.permission === 'read_only' ? 'read_only' : 'read_write', allowDelete: Boolean(input.allowDelete), createdAt: new Date().toISOString(), online: true };
   items.push(item); await writeWorkspaces(items); return item;
 });
+ipcMain.handle('workspace:update', async (_event, input) => {
+  const items = await readWorkspaces();
+  const index = items.findIndex((item) => item.id === input.id);
+  if (index < 0) throw new Error('项目不存在');
+  items[index] = { ...items[index], ...input };
+  await writeWorkspaces(items);
+  return items[index];
+});
 ipcMain.handle('workspace:remove', async (_event, id) => {
   const items = (await readWorkspaces()).filter(item => item.id !== id);
   await writeWorkspaces(items); return items;
