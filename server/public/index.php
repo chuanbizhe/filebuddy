@@ -1,7 +1,14 @@
 <?php
 declare(strict_types=1);
 
-require_once dirname(__DIR__) . '/src/TencentSmsService.php';
+$servicePath = __DIR__ . '/src/TencentSmsService.php';
+if (!is_file($servicePath)) {
+    // Conventional deployments keep src beside public.
+    $servicePath = @is_file(dirname(__DIR__) . '/src/TencentSmsService.php')
+        ? dirname(__DIR__) . '/src/TencentSmsService.php'
+        : $servicePath;
+}
+require_once $servicePath;
 
 // FileBuddy PHP 8.1 control plane and public landing page.
 // Credentials must be supplied by environment variables, never by source files.
@@ -10,6 +17,9 @@ header('Access-Control-Allow-Headers: Content-Type, Authorization');
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') { http_response_code(204); exit; }
 
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+if (str_starts_with($path, '/index.php/')) {
+    $path = substr($path, strlen('/index.php')) ?: '/';
+}
 $method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 
 function filebuddyEnv(string $name, string $fallback = ''): string
@@ -22,7 +32,8 @@ function filebuddyDb(): PDO
 {
     static $pdo = null;
     if ($pdo instanceof PDO) return $pdo;
-    $dbPath = filebuddyEnv('DB_PATH', dirname(__DIR__) . '/data/filebuddy.sqlite');
+    // Prefer an explicit private path; shared hosting keeps the fallback inside the domain sandbox.
+    $dbPath = filebuddyEnv('DB_PATH', __DIR__ . '/data/filebuddy.sqlite');
     $directory = dirname($dbPath);
     if (!is_dir($directory)) mkdir($directory, 0700, true);
     $pdo = new PDO('sqlite:' . $dbPath, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
@@ -62,7 +73,10 @@ function filebuddyAuth(PDO $pdo): ?array
 
 function filebuddyPublicBase(): string
 {
-    return rtrim(filebuddyEnv('PUBLIC_BASE_URL', 'http://127.0.0.1:8080'), '/');
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $fallback = $host !== '' ? $scheme . '://' . $host . '/index.php' : 'http://127.0.0.1:8080';
+    return rtrim(filebuddyEnv('PUBLIC_BASE_URL', $fallback), '/');
 }
 
 function filebuddyPhone(string $phone): string
