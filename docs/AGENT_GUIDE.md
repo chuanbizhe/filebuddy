@@ -48,3 +48,51 @@ MCP 和 API 只代表连接控制面；真实文件仍留在用户设备的授�
 ## 回复用户时
 
 简要说明：读取了哪些文件、修改了什么、是否成功验证。不要声称访问了 Workspace 之外的内容，也不要展示真实磁盘路径。
+
+## HTTP 请求格式
+
+请求使用 JSON，并在需要登录的接口带上：
+
+```http
+Content-Type: application/json
+Authorization: Bearer <登录令牌>
+```
+
+Bridge 请求使用 `X-FileBuddy-Key: <Workspace API Key>`。常用接口：
+
+```text
+GET  /health
+GET  /v1/config
+POST /v1/auth/send-code       {"phone":"13800138000","purpose":"register"}
+POST /v1/auth/register        {"phone":"13800138000","password":"至少8位","code":"123456"}
+POST /v1/auth/login           {"phone":"13800138000","password":"至少8位"}
+POST /v1/auth/login-code      {"phone":"13800138000","code":"123456"}
+GET  /v1/workspaces           Authorization: Bearer <token>
+POST /v1/workspaces           {"name":"项目","permission":"read_write","allowDelete":false}
+POST /v1/workspaces/<id>/connections
+GET  /v1/bridge/<id>          X-FileBuddy-Key: <key>
+GET  /mcp/<id>                X-FileBuddy-Key: <key>
+```
+
+创建连接后，服务端返回 `mcpUrl`、`apiUrl`、`apiKey` 和 `agentPrompt`。API Key 只保存到安全的 Agent 配置，不要写入日志或回复内容。
+
+未知路径或方法不会只返回空白 404，而会返回 JSON：`error=unsupported_request`、`code=FILEBUDDY_ROUTE_NOT_FOUND`、`hint`、`docs` 和 `examples`。遇到该错误时，先读取 `docs` 再按示例修正请求。
+
+## 正确请求示例
+
+```bash
+BASE='http://filebuddy.elo.ink/index.php'
+TOKEN=$(curl -sS -X POST "$BASE/v1/auth/login" \
+  -H 'Content-Type: application/json' \
+  -d '{"phone":"13800138000","password":"your-password"}' | jq -r .token)
+WORKSPACE=$(curl -sS -X POST "$BASE/v1/workspaces" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"我的项目","permission":"read_write","allowDelete":false}')
+ID=$(echo "$WORKSPACE" | jq -r .id)
+CONNECTION=$(curl -sS -X POST "$BASE/v1/workspaces/$ID/connections" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{}')
+KEY=$(echo "$CONNECTION" | jq -r .apiKey)
+curl -sS "$BASE/v1/bridge/$ID" -H "X-FileBuddy-Key: $KEY"
+```
+
+最后一步成功响应必须包含 `workspace: "/workspace"` 和 `tools`。不要把真实磁盘路径、密码或 API Key 写入日志。

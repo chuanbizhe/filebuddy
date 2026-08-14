@@ -279,4 +279,19 @@ if ($method === 'POST' && $path === '/v1/sessions') {
     if (!is_array($body) || empty($body['workspaceId'])) $json(['error' => 'workspaceId is required'], 422);
     $json(['sessionId' => 'sess_' . bin2hex(random_bytes(10)), 'expiresIn' => 900, 'status' => 'created']);
 }
-$json(['error' => 'not_found'], 404);
+$json([
+    'error' => 'unsupported_request',
+    'code' => 'FILEBUDDY_ROUTE_NOT_FOUND',
+    'message' => '请求路径或 HTTP 方法不符合 FileBuddy API 格式。请先阅读 Agent 文档，再按示例重试。',
+    'method' => $method,
+    'path' => $path,
+    'hint' => '仅使用文档列出的路径、方法和请求头；不要把真实磁盘路径当作 API 路径。',
+    'docs' => filebuddyPublicBase() . '/agent-guide.md',
+    'examples' => [
+        'health' => ['method' => 'GET', 'path' => '/health'],
+        'config' => ['method' => 'GET', 'path' => '/v1/config'],
+        'login' => ['method' => 'POST', 'path' => '/v1/auth/login', 'body' => ['phone' => '13800138000', 'password' => '至少 8 位密码']],
+        'workspaces' => ['method' => 'GET', 'path' => '/v1/workspaces', 'headers' => ['Authorization' => 'Bearer <登录令牌>']],
+        'bridge' => ['method' => 'GET', 'path' => '/v1/bridge/<workspaceId>', 'headers' => ['X-FileBuddy-Key' => '<Workspace API Key>']],
+    ],
+], 404);
