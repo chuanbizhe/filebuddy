@@ -6,6 +6,24 @@ on:
     tags: ['v*']
 
 jobs:
+  php-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.1'
+      - run: php -l server/public/index.php
+      - name: Start API and check health
+        shell: bash
+        run: |
+          php -S 127.0.0.1:8080 -t server/public server/public/index.php >/tmp/filebuddy-php.log 2>&1 &
+          server_pid=$!
+          trap 'kill $server_pid' EXIT
+          for i in {1..20}; do curl --fail --silent http://127.0.0.1:8080/health && exit 0; sleep 1; done
+          cat /tmp/filebuddy-php.log
+          exit 1
+
   build:
     strategy:
       matrix:
