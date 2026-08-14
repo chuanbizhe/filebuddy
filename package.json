@@ -1,0 +1,29 @@
+{
+  "name": "filebuddy",
+  "version": "0.1.0",
+  "description": "文小哥 FileBuddy - 把本地文件夹直接交给 AI",
+  "private": true,
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test",
+    "build": "electron-builder --publish never",
+    "build:win": "electron-builder --win nsis portable --publish never",
+    "build:linux": "electron-builder --linux AppImage --publish never",
+    "build:mac": "electron-builder --mac dmg --publish never"
+  },
+  "build": {
+    "appId": "cn.filebuddy.desktop",
+    "productName": "文小哥 FileBuddy",
+    "directories": { "output": "release" },
+    "files": ["electron/**/*", "renderer/**/*", "package.json"],
+    "win": { "target": ["nsis", "portable"], "artifactName": "FileBuddy-${version}-${os}-${arch}.${ext}" },
+    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true },
+    "mac": { "target": ["dmg"], "category": "public.app-category.productivity" },
+    "linux": { "target": ["AppImage"], "category": "Utility" }
+  },
+  "devDependencies": {
+    "electron": "^36.3.1",
+    "electron-builder": "^26.0.12"
+  }
+}

@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>文小哥 FileBuddy</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+  <header class="topbar"><div class="brand"><span class="brand-mark">文</span><div><strong>文小哥</strong><small>FileBuddy</small></div></div><span class="connection"><i></i>本地服务正常</span></header>
+  <main>
+    <section class="hero"><div><p class="eyebrow">LOCAL WORKSPACE</p><h1>把本地文件夹直接交给 AI</h1><p class="subtitle">选择一个项目，生成连接内容，让云端 Agent 在你的授权范围内读取和修改文件。</p></div><button id="addButton" class="primary">＋ 添加项目</button></section>
+    <section id="listView"><div class="section-heading"><h2>我的项目</h2><span id="projectCount" class="muted"></span></div><div id="workspaceList" class="workspace-grid"></div><div id="emptyState" class="empty card"><div class="empty-icon">＋</div><h3>还没有项目</h3><p>添加一个本地文件夹，开始第一次连接。</p><button id="emptyAdd" class="secondary">添加第一个项目</button></div></section>
+    <section id="detailView" class="hidden"></section>
+  </main>
+  <dialog id="createDialog"><form method="dialog" id="createForm"><div class="dialog-head"><div><p class="eyebrow">NEW WORKSPACE</p><h2>添加项目</h2></div><button value="cancel" class="icon-button">×</button></div><label>项目名称<input id="nameInput" required placeholder="例如：EloOffice"></label><label>本地文件夹<div class="folder-row"><input id="folderInput" readonly required placeholder="请选择一个文件夹"><button type="button" id="chooseFolder" class="secondary">选择</button></div></label><label>访问权限<select id="permissionInput"><option value="read_write">读写</option><option value="read_only">只读</option></select></label><label class="check"><input id="deleteInput" type="checkbox"> 允许 AI 删除文件 <span>默认关闭</span></label><p id="formError" class="error"></p><div class="dialog-actions"><button value="cancel" class="secondary">取消</button><button id="createSubmit" class="primary" value="default">创建项目</button></div></form></dialog>
+  <script src="app.js"></script>
+</body>
+</html>
