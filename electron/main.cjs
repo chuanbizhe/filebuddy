@@ -38,7 +38,17 @@ function startBridge(item) {
           const current = (await readWorkspaces()).find(entry => entry.id === item.id)?.stats || {};
           await updateStats(item.id, { requests: Number(current.requests || 0) + 1, bytesUp: Number(current.bytesUp || 0) + requestBytes, lastActivityAt: new Date().toISOString() });
           let result;
-          try { result = { jsonrpc: '2.0', id: data.request.payload.id ?? null, result: await handleRequest(item, data.request.payload) }; }
+          try {
+            const payload = data.request.payload || {};
+            if (payload.method === 'tools/call' && payload.params?.name === 'upload_large_file') {
+              const filePath = path.resolve(item.folder, String(payload.params.arguments?.path || '').replace(/^[/\\]*workspace[/\\]*/i, ''));
+              if (item.permission !== 'read_write') throw new Error('workspace_read_only');
+              if (!filePath.startsWith(`${path.resolve(item.folder)}${path.sep}`)) throw new Error('path_outside_workspace');
+              const form = new FormData(); form.append('path', `/workspace/${path.relative(item.folder, filePath).split(path.sep).join('/')}`); form.append('file', new Blob([await fs.readFile(filePath)]), path.basename(filePath));
+              const upload = await fetch(`${apiBase()}/v1/bridge/${encodeURIComponent(item.remoteId)}/large-upload`, { method: 'POST', headers: { 'X-FileBuddy-Key': item.connection.apiKey }, body: form });
+              const uploadResult = await upload.json(); if (!upload.ok) throw new Error(uploadResult.error || `upload_failed_${upload.status}`); result = { jsonrpc: '2.0', id: payload.id ?? null, result: uploadResult };
+            } else result = { jsonrpc: '2.0', id: payload.id ?? null, result: await handleRequest(item, payload) };
+          }
           catch (error) { result = { jsonrpc: '2.0', id: data.request.payload.id ?? null, error: { code: -32000, message: error.message || 'local_bridge_error' } }; }
           const responseBody = JSON.stringify({ requestId: data.request.id, response: result });
           await fetch(`${apiBase()}/v1/bridge/${encodeURIComponent(item.remoteId)}/respond`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-FileBuddy-Key': item.connection.apiKey }, body: responseBody });

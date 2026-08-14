@@ -20,6 +20,9 @@ require_once $servicePath;
 $alipayPath = __DIR__ . '/src/AlipayGateway.php';
 if (!@is_file($alipayPath)) $alipayPath = @is_file(dirname(__DIR__) . '/src/AlipayGateway.php') ? dirname(__DIR__) . '/src/AlipayGateway.php' : $alipayPath;
 if (@is_file($alipayPath)) require_once $alipayPath;
+$ossPath = __DIR__ . '/src/OssGateway.php';
+if (!@is_file($ossPath)) $ossPath = @is_file(dirname(__DIR__) . '/src/OssGateway.php') ? dirname(__DIR__) . '/src/OssGateway.php' : $ossPath;
+if (@is_file($ossPath)) require_once $ossPath;
 
 // FileBuddy PHP 8.1 control plane and public landing page.
 // Credentials must be supplied by environment variables, never by source files.
@@ -294,7 +297,7 @@ if ($method === 'POST' && preg_match('#^/mcp/([^/]+)$#', $path, $matches)) {
     $payload = filebuddyBody();
     if (!isset($payload['method'])) $json(['error' => 'invalid_mcp_request', 'hint' => '请求必须包含 JSON-RPC method'], 422);
     if (in_array($payload['method'], ['initialize', 'tools/list'], true)) {
-        $json(['jsonrpc' => '2.0', 'id' => $payload['id'] ?? null, 'result' => $payload['method'] === 'initialize' ? ['protocolVersion' => '2025-03-26', 'capabilities' => ['tools' => new stdClass()], 'serverInfo' => ['name' => 'filebuddy', 'version' => '0.1.1']] : ['tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_text', 'write_file']]]);
+        $json(['jsonrpc' => '2.0', 'id' => $payload['id'] ?? null, 'result' => $payload['method'] === 'initialize' ? ['protocolVersion' => '2025-03-26', 'capabilities' => ['tools' => new stdClass()], 'serverInfo' => ['name' => 'filebuddy', 'version' => '0.3.0']] : ['tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_text', 'write_file', 'upload_large_file']]]);
     }
     $requestId = 'req_' . bin2hex(random_bytes(12));
     $now = gmdate('c');
@@ -314,7 +317,18 @@ if ($method === 'POST' && preg_match('#^/mcp/([^/]+)$#', $path, $matches)) {
 if ($method === 'GET' && preg_match('#^/v1/bridge/([^/]+)$#', $path, $matches)) {
     $workspace = filebuddyConnectionWorkspace($pdo, $matches[1]);
     if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
-    $json(['name' => $workspace['name'], 'workspace' => '/workspace', 'permission' => $workspace['permission'], 'tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_files', 'search_text', 'create_file', 'write_file', 'apply_patch', 'rename_file', 'move_file', 'copy_file', 'delete_file']]);
+    $json(['name' => $workspace['name'], 'workspace' => '/workspace', 'permission' => $workspace['permission'], 'tools' => ['get_workspace_info', 'list_files', 'get_file_info', 'read_file', 'read_file_range', 'search_files', 'search_text', 'create_file', 'write_file', 'apply_patch', 'rename_file', 'move_file', 'copy_file', 'delete_file', 'upload_large_file']]);
+}
+if ($method === 'POST' && preg_match('#^/v1/bridge/([^/]+)/large-upload$#', $path, $matches)) {
+    $workspace = filebuddyConnectionWorkspace($pdo, $matches[1]);
+    if (!$workspace) $json(['error' => 'invalid_connection_key'], 401);
+    if ($workspace['permission'] !== 'read_write') $json(['error' => 'workspace_read_only'], 403);
+    if (!class_exists('OssGateway') || !(new OssGateway())->configured()) $json(['error' => 'oss_not_configured'], 503);
+    $relative = (string)($_POST['path'] ?? ''); $relative = str_replace('\\', '/', preg_replace('#^/workspace/?#', '', $relative));
+    if ($relative === '' || str_contains($relative, '..') || !preg_match('/^[A-Za-z0-9._\/-]+$/', $relative)) $json(['error' => 'invalid_object_path'], 422);
+    $file = $_FILES['file'] ?? null; if (!is_array($file) || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) $json(['error' => 'file_upload_required'], 422);
+    try { $result = (new OssGateway())->upload((string)$file['tmp_name'], 'filebuddy/' . $workspace['public_id'] . '/' . $relative, (string)($file['type'] ?? 'application/octet-stream')); $json($result, 201); }
+    catch (Throwable $exception) { $json(['error' => 'oss_upload_failed', 'message' => $exception->getMessage()], 502); }
 }
 if ($method === 'GET' && preg_match('#^/mcp/([^/]+)$#', $path, $matches)) {
     $json(['name' => 'filebuddy', 'workspaceId' => $matches[1], 'transport' => 'streamable-http', 'authentication' => 'X-FileBuddy-Key', 'message' => 'Use the generated connection key to open this Workspace.']);
@@ -324,7 +338,7 @@ if ($method === 'GET' && $path === '/health') {
     $json(['ok' => true, 'service' => 'filebuddy-api', 'php' => PHP_VERSION, 'time' => gmdate('c')]);
 }
 if ($method === 'GET' && $path === '/v1/config') {
-    $json(['relayThresholdBytes' => (int)($_ENV['RELAY_THRESHOLD_BYTES'] ?? getenv('RELAY_THRESHOLD_BYTES') ?: 5242880), 'protocolVersion' => 1, 'smsConfigured' => (new TencentSmsService())->configured(), 'alipayConfigured' => class_exists('AlipayGateway') && (new AlipayGateway())->configured()]);
+    $json(['relayThresholdBytes' => (int)($_ENV['RELAY_THRESHOLD_BYTES'] ?? getenv('RELAY_THRESHOLD_BYTES') ?: 5242880), 'protocolVersion' => 1, 'smsConfigured' => (new TencentSmsService())->configured(), 'alipayConfigured' => class_exists('AlipayGateway') && (new AlipayGateway())->configured(), 'ossConfigured' => class_exists('OssGateway') && (new OssGateway())->configured()]);
 }
 if ($method === 'GET' && $path === '/v1/billing/plans') {
     $json(['plans' => [['id' => 'monthly', 'name' => 'FileBuddy 月度连接', 'amount' => 1.99, 'currency' => 'CNY', 'periodDays' => 30], ['id' => 'yearly', 'name' => 'FileBuddy 年度连接', 'amount' => 19.90, 'currency' => 'CNY', 'periodDays' => 365]]]);
