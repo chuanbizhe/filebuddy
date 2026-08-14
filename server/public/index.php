@@ -75,7 +75,9 @@ function filebuddyPublicBase(): string
 {
     $host = $_SERVER['HTTP_HOST'] ?? '';
     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-    $fallback = $host !== '' ? $scheme . '://' . $host . '/index.php' : 'http://127.0.0.1:8080';
+    $server = strtolower($_SERVER['SERVER_SOFTWARE'] ?? '');
+    $suffix = str_contains($server, 'nginx') ? '/index.php' : '';
+    $fallback = $host !== '' ? $scheme . '://' . $host . $suffix : 'http://127.0.0.1:8080';
     return rtrim(filebuddyEnv('PUBLIC_BASE_URL', $fallback), '/');
 }
 
