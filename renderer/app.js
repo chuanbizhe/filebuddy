@@ -4,9 +4,22 @@ let authMode = 'login_password';
 let authToken = localStorage.getItem('filebuddy_token') || '';
 const BUILTIN_API_BASE = window.filebuddy.getApiBase();
 let apiBase = BUILTIN_API_BASE;
+let detailTimer = null;
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c])); }
 function formatBytes(value) { const bytes = Number(value || 0); if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`; return `${(bytes / 1024 / 1024).toFixed(1)} MB`; }
+async function loadBilling() {
+  try {
+    const plans = await api('/v1/billing/plans');
+    $('#billingPlans').innerHTML = plans.plans.map(plan => `<button class="secondary" data-plan="${escapeHtml(plan.id)}"><strong>${escapeHtml(plan.name)}</strong><small>¥${Number(plan.amount).toFixed(2)} / ${plan.periodDays} 天</small></button>`).join('');
+    document.querySelectorAll('[data-plan]').forEach(button => button.addEventListener('click', async () => {
+      if (!authToken) return showAuth();
+      button.disabled = true; $('#billingError').textContent = '';
+      try { const order = await api('/v1/billing/orders', { method: 'POST', body: JSON.stringify({ plan: button.dataset.plan }) }); $('#billingStatus').innerHTML = `订单 ${escapeHtml(order.orderNo)} 待支付`; $('#billingError').innerHTML = `<div class="qr-result">请使用支付宝扫描付款码<code>${escapeHtml(order.qrCode)}</code></div>`; } catch (error) { $('#billingError').textContent = error.message || '下单失败'; } finally { button.disabled = false; }
+    }));
+    if (authToken) { const status = await api('/v1/billing/status'); $('#billingStatus').textContent = status.active ? `当前套餐：${status.plan}，有效期至 ${status.expiresAt}` : '当前为免费账户'; }
+  } catch (error) { $('#billingError').textContent = error.message || '套餐读取失败'; }
+}
 function permissionText(value) { return value === 'read_only' ? '只读' : '读写'; }
 async function api(path, options = {}) {
   const response = await fetch(`${apiBase.replace(/\/$/, '')}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}), ...(options.headers || {}) } });
@@ -36,9 +49,11 @@ function connectionHtml(connection) {
 function showDetail(id) {
   const item = workspaces.find((entry) => entry.id === id); if (!item) return;
   const stats = item.stats || { requests: 0, bytesUp: 0, bytesDown: 0 };
+  if (detailTimer) clearInterval(detailTimer);
   $('#listView').classList.add('hidden'); $('#detailView').classList.remove('hidden');
   $('#detailView').innerHTML = `<div class="detail-card card"><button class="back" id="backButton">← 返回项目</button><div class="detail-header"><div><div class="status"><i></i>当前设备在线</div><h2>${escapeHtml(item.name)}</h2><div class="detail-path">${escapeHtml(item.folder)}</div></div><span class="tag">${permissionText(item.permission)}</span></div><div class="copy-card"><h3>把这个项目交给 AI</h3><p>连接地址和 Key 与当前 Workspace 权限绑定。</p>${connectionHtml(item.connection)}</div><div class="detail-stats"><div class="stat"><small>当前连接</small><strong>${item.online ? '1 个设备' : '0 个设备'}</strong></div><div class="stat"><small>已处理请求</small><strong>${stats.requests}</strong></div><div class="stat"><small>流量（上行 / 下行）</small><strong>${formatBytes(stats.bytesUp)} / ${formatBytes(stats.bytesDown)}</strong></div></div><div class="detail-actions"><button class="secondary" id="openButton">打开文件夹</button><button class="secondary danger" id="removeButton">移除项目</button></div></div>`;
-  $('#backButton').addEventListener('click', () => { $('#detailView').classList.add('hidden'); $('#listView').classList.remove('hidden'); });
+  $('#backButton').addEventListener('click', () => { if (detailTimer) clearInterval(detailTimer); $('#detailView').classList.add('hidden'); $('#listView').classList.remove('hidden'); });
+  detailTimer = setInterval(async () => { const latest = await window.filebuddy.getWorkspaceStats(item.id); const nodes = document.querySelectorAll('#detailView .detail-stats .stat strong'); if (nodes[1]) nodes[1].textContent = latest.requests || 0; if (nodes[2]) nodes[2].textContent = `${formatBytes(latest.bytesUp)} / ${formatBytes(latest.bytesDown)}`; }, 1500);
   $('#openButton').addEventListener('click', () => window.filebuddy.openFolder(item.folder));
   $('#removeButton').addEventListener('click', async () => { if (confirm('只移除项目记录，不会删除本地文件。继续吗？')) { workspaces = await window.filebuddy.removeWorkspace(item.id); $('#backButton').click(); renderList(); } });
   const generateButton = $('#generateButton');
@@ -57,4 +72,6 @@ $('#authCodeModeButton').addEventListener('click', () => { authMode = authMode =
 $('#sendCodeButton').addEventListener('click', async () => { $('#authError').textContent = ''; try { apiBase = $('#apiBaseInput').value.trim().replace(/\/$/, ''); const purpose = authMode === 'register' ? 'register' : 'login'; await api('/v1/auth/send-code', { method: 'POST', body: JSON.stringify({ phone: $('#phoneInput').value.trim(), purpose }) }); $('#sendCodeButton').textContent = '已发送'; setTimeout(() => { $('#sendCodeButton').textContent = '获取验证码'; }, 60000); } catch (error) { $('#authError').textContent = error.message || '验证码发送失败'; } });
 $('#authForm').addEventListener('submit', async (event) => { event.preventDefault(); $('#authError').textContent = ''; try { apiBase = $('#apiBaseInput').value.trim().replace(/\/$/, ''); const phone = $('#phoneInput').value.trim(); const result = authMode === 'register' ? await api('/v1/auth/register', { method: 'POST', body: JSON.stringify({ phone, password: $('#passwordInput').value, code: $('#codeInput').value }) }) : authMode === 'login_code' ? await api('/v1/auth/login-code', { method: 'POST', body: JSON.stringify({ phone, code: $('#codeInput').value }) }) : await api('/v1/auth/login', { method: 'POST', body: JSON.stringify({ phone, password: $('#passwordInput').value }) }); setAuth(result.token, apiBase); localStorage.setItem('filebuddy_email', result.user.phone || phone); $('#authDialog').close(); await loadWorkspaces(); } catch (error) { $('#authError').textContent = error.message || '登录失败'; } });
 (function initAuthForm() { $('#apiBaseInput').value = apiBase; refreshAuthForm(); }());
-(async () => { try { if (!authToken) return showAuth(); await api('/v1/me'); await loadWorkspaces(); } catch { authToken = ''; localStorage.removeItem('filebuddy_token'); showAuth(); } })();
+$('#authForm').addEventListener('submit', () => setTimeout(loadBilling, 200));
+loadBilling();
+(async () => { try { if (!authToken) return showAuth(); await api('/v1/me'); await loadWorkspaces(); await loadBilling(); } catch { authToken = ''; localStorage.removeItem('filebuddy_token'); showAuth(); } })();

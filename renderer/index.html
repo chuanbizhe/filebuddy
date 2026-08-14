@@ -4,6 +4,7 @@
 <body>
   <header class="topbar"><div class="brand"><span class="brand-mark">文</span><div><strong>文小哥</strong><small>FileBuddy</small></div></div><span class="connection"><i></i>本地服务正常</span></header>
   <main>
+    <section id="billingCard" class="billing-card card"><div><p class="eyebrow">FILEBUDDY SERVICE</p><h2>连接服务</h2><p id="billingStatus" class="muted">正在读取套餐状态…</p></div><div id="billingPlans" class="billing-plans"></div><p id="billingError" class="error"></p></section>
     <section class="hero"><div><p class="eyebrow">LOCAL WORKSPACE</p><h1>把本地文件夹直接交给 AI</h1><p class="subtitle">选择一个项目，生成连接内容，让云端 Agent 在你的授权范围内读取和修改文件。</p></div><button id="addButton" class="primary">＋ 添加项目</button></section>
     <section id="listView"><div class="section-heading"><h2>我的项目</h2><span id="projectCount" class="muted"></span></div><div id="workspaceList" class="workspace-grid"></div><div id="emptyState" class="empty card"><div class="empty-icon">＋</div><h3>还没有项目</h3><p>添加一个本地文件夹，开始第一次连接。</p><button id="emptyAdd" class="secondary">添加第一个项目</button></div></section>
     <section id="detailView" class="hidden"></section>
