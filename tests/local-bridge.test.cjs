@@ -14,5 +14,6 @@ test('local bridge reads workspace files and blocks traversal', async () => {
   const file = await handleRequest(workspace, { method: 'tools/call', params: { name: 'read_file', arguments: { path: '/workspace/hello.txt' } } });
   assert.equal(file.content, 'hello FileBuddy');
   await assert.rejects(() => handleRequest(workspace, { method: 'tools/call', params: { name: 'read_file', arguments: { path: '/workspace/../secret.txt' } } }), /path_outside_workspace/);
+  await assert.rejects(() => handleRequest({ ...workspace, permission: 'read_only' }, { method: 'tools/call', params: { name: 'write_file', arguments: { path: '/workspace/new.txt', content: 'blocked' } } }), /workspace_read_only/);
   await fs.rm(root, { recursive: true, force: true });
 });
