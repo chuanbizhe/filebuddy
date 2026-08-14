@@ -17,6 +17,9 @@ if (!is_file($servicePath)) {
         : $servicePath;
 }
 require_once $servicePath;
+$alipayPath = __DIR__ . '/src/AlipayGateway.php';
+if (!@is_file($alipayPath)) $alipayPath = @is_file(dirname(__DIR__) . '/src/AlipayGateway.php') ? dirname(__DIR__) . '/src/AlipayGateway.php' : $alipayPath;
+if (@is_file($alipayPath)) require_once $alipayPath;
 
 // FileBuddy PHP 8.1 control plane and public landing page.
 // Credentials must be supplied by environment variables, never by source files.
@@ -49,10 +52,13 @@ function filebuddyDb(): PDO
     $pdo->exec('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)');
     $columns = array_column($pdo->query('PRAGMA table_info(users)')->fetchAll(), 'name');
     if (!in_array('phone', $columns, true)) $pdo->exec('ALTER TABLE users ADD COLUMN phone TEXT');
+    if (!in_array('plan', $columns, true)) $pdo->exec("ALTER TABLE users ADD COLUMN plan TEXT NOT NULL DEFAULT 'free'");
+    if (!in_array('plan_expires_at', $columns, true)) $pdo->exec('ALTER TABLE users ADD COLUMN plan_expires_at TEXT NULL');
     $pdo->exec('CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, public_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, permission TEXT NOT NULL, allow_delete INTEGER NOT NULL DEFAULT 0, device_status TEXT NOT NULL DEFAULT "online", created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS connection_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL, key_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS bridge_requests (id TEXT PRIMARY KEY, workspace_id INTEGER NOT NULL, payload TEXT NOT NULL, response TEXT NULL, status TEXT NOT NULL DEFAULT "pending", created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS billing_orders (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, order_no TEXT NOT NULL UNIQUE, plan TEXT NOT NULL, amount REAL NOT NULL, status TEXT NOT NULL DEFAULT "pending", qr_code TEXT NULL, trade_no TEXT NULL, created_at TEXT NOT NULL, paid_at TEXT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS sms_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, sent_at TEXT NOT NULL, UNIQUE(phone, purpose))');
     return $pdo;
 }
@@ -318,7 +324,61 @@ if ($method === 'GET' && $path === '/health') {
     $json(['ok' => true, 'service' => 'filebuddy-api', 'php' => PHP_VERSION, 'time' => gmdate('c')]);
 }
 if ($method === 'GET' && $path === '/v1/config') {
-    $json(['relayThresholdBytes' => (int)($_ENV['RELAY_THRESHOLD_BYTES'] ?? getenv('RELAY_THRESHOLD_BYTES') ?: 5242880), 'protocolVersion' => 1, 'smsConfigured' => (new TencentSmsService())->configured()]);
+    $json(['relayThresholdBytes' => (int)($_ENV['RELAY_THRESHOLD_BYTES'] ?? getenv('RELAY_THRESHOLD_BYTES') ?: 5242880), 'protocolVersion' => 1, 'smsConfigured' => (new TencentSmsService())->configured(), 'alipayConfigured' => class_exists('AlipayGateway') && (new AlipayGateway())->configured()]);
+}
+if ($method === 'GET' && $path === '/v1/billing/plans') {
+    $json(['plans' => [['id' => 'monthly', 'name' => 'FileBuddy 月度连接', 'amount' => 1.99, 'currency' => 'CNY', 'periodDays' => 30], ['id' => 'yearly', 'name' => 'FileBuddy 年度连接', 'amount' => 19.90, 'currency' => 'CNY', 'periodDays' => 365]]]);
+}
+if ($method === 'POST' && $path === '/v1/billing/orders') {
+    $user = filebuddyAuth($pdo);
+    if (!$user) $json(['error' => 'unauthorized'], 401);
+    if (!class_exists('AlipayGateway') || !(new AlipayGateway())->configured()) $json(['error' => 'alipay_not_configured'], 503);
+    $body = filebuddyBody(); $plan = (string)($body['plan'] ?? 'monthly');
+    $plans = ['monthly' => ['amount' => 1.99, 'name' => 'FileBuddy 月度连接'], 'yearly' => ['amount' => 19.90, 'name' => 'FileBuddy 年度连接']];
+    if (!isset($plans[$plan])) $json(['error' => 'invalid_plan', 'plans' => array_keys($plans)], 422);
+    $orderNo = 'FB' . gmdate('YmdHis') . strtoupper(bin2hex(random_bytes(5))); $now = gmdate('c'); $amount = $plans[$plan]['amount'];
+    $statement = $pdo->prepare('INSERT INTO billing_orders (user_id, order_no, plan, amount, status, created_at) VALUES (?, ?, ?, ?, "pending", ?)');
+    $statement->execute([(int)$user['id'], $orderNo, $plan, $amount, $now]);
+    try {
+        $gateway = new AlipayGateway(); $notify = filebuddyPublicBase() . '/v1/billing/alipay/notify'; $response = $gateway->precreate($orderNo, (string)$amount, $plans[$plan]['name'], $notify); $qr = (string)($response['qr_code'] ?? '');
+        if ($qr === '') throw new RuntimeException('支付宝未返回付款码');
+        $pdo->prepare('UPDATE billing_orders SET qr_code = ? WHERE order_no = ?')->execute([$qr, $orderNo]);
+        $json(['orderNo' => $orderNo, 'plan' => $plan, 'amount' => $amount, 'status' => 'pending', 'qrCode' => $qr, 'expiresIn' => 7200], 201);
+    } catch (Throwable $exception) {
+        $pdo->prepare('UPDATE billing_orders SET status = "failed" WHERE order_no = ?')->execute([$orderNo]);
+        $json(['error' => 'alipay_order_failed', 'message' => $exception->getMessage()], 502);
+    }
+}
+if ($method === 'GET' && preg_match('#^/v1/billing/orders/([^/]+)$#', $path, $matches)) {
+    $user = filebuddyAuth($pdo); if (!$user) $json(['error' => 'unauthorized'], 401);
+    $statement = $pdo->prepare('SELECT order_no, plan, amount, status, qr_code, trade_no, created_at, paid_at FROM billing_orders WHERE order_no = ? AND user_id = ?'); $statement->execute([$matches[1], (int)$user['id']]); $order = $statement->fetch();
+    if (!$order) $json(['error' => 'order_not_found'], 404);
+    $json($order);
+}
+if ($method === 'GET' && $path === '/v1/billing/status') {
+    $user = filebuddyAuth($pdo); if (!$user) $json(['error' => 'unauthorized'], 401);
+    $expires = (string)($user['plan_expires_at'] ?? '');
+    $active = ($user['plan'] ?? 'free') !== 'free' && $expires !== '' && strtotime($expires) > time();
+    $json(['plan' => $active ? $user['plan'] : 'free', 'active' => $active, 'expiresAt' => $active ? $expires : null]);
+}
+if ($method === 'POST' && $path === '/v1/billing/alipay/notify') {
+    $params = $_POST ?: (json_decode(file_get_contents('php://input') ?: '{}', true) ?: []);
+    if (!class_exists('AlipayGateway') || !(new AlipayGateway())->verifyNotification($params)) { http_response_code(400); echo 'fail'; exit; }
+    $orderNo = (string)($params['out_trade_no'] ?? ''); $tradeNo = (string)($params['trade_no'] ?? ''); $paidAmount = (float)($params['total_amount'] ?? 0);
+    $statement = $pdo->prepare('SELECT * FROM billing_orders WHERE order_no = ?'); $statement->execute([$orderNo]); $order = $statement->fetch();
+    if (!$order || abs((float)$order['amount'] - $paidAmount) > 0.001) { http_response_code(400); echo 'fail'; exit; }
+    if ($order['status'] !== 'paid') {
+        $paidAt = gmdate('c');
+        $pdo->beginTransaction();
+        $pdo->prepare('UPDATE billing_orders SET status = "paid", trade_no = ?, paid_at = ? WHERE order_no = ?')->execute([$tradeNo, $paidAt, $orderNo]);
+        $days = $order['plan'] === 'yearly' ? 365 : 30;
+        $current = $pdo->prepare('SELECT plan_expires_at FROM users WHERE id = ?'); $current->execute([(int)$order['user_id']]);
+        $existing = (string)($current->fetchColumn() ?: ''); $base = max(time(), strtotime($existing) ?: 0);
+        $expires = gmdate('c', $base + $days * 86400);
+        $pdo->prepare('UPDATE users SET plan = ?, plan_expires_at = ? WHERE id = ?')->execute([$order['plan'], $expires, (int)$order['user_id']]);
+        $pdo->commit();
+    }
+    echo 'success'; exit;
 }
 if ($method === 'POST' && $path === '/v1/sessions') {
     $body = json_decode(file_get_contents('php://input') ?: '{}', true);

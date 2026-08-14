@@ -15,6 +15,7 @@ jobs:
           php-version: '8.1'
       - run: php -l server/public/index.php
       - run: php -l server/src/TencentSmsService.php
+      - run: php -l server/src/AlipayGateway.php
       - name: Smoke-test API auth and connection credentials
         shell: bash
         run: |
@@ -24,6 +25,7 @@ jobs:
           for i in {1..20}; do curl --fail --silent http://127.0.0.1:8080/health >/tmp/filebuddy-health.json && break; sleep 1; done
           test -s /tmp/filebuddy-health.json
           cat /tmp/filebuddy-health.json
+          curl --fail --silent http://127.0.0.1:8080/v1/billing/plans | jq -e '.plans | length == 2' >/dev/null
           email="ci-${GITHUB_RUN_ID}@example.test"
           register=$(curl --fail --silent -X POST http://127.0.0.1:8080/v1/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$email\",\"password\":\"TestPassword123\"}")
           token=$(echo "$register" | jq -r .token)

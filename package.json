@@ -1,6 +1,6 @@
 {
   "name": "filebuddy",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "文小哥 FileBuddy - 把本地文件夹直接交给 AI",
   "author": "FileBuddy Team",
   "private": true,
