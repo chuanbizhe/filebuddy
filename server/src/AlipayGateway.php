@@ -40,6 +40,7 @@ final class AlipayGateway
         if (!$this->configured() || empty($params['sign'])) return false;
         $sign = (string)$params['sign'];
         unset($params['sign'], $params['sign_type']);
+        $params = array_filter($params, static fn($value, $key) => $value !== '' && $value !== null && !is_array($value) && $key !== 'sign', ARRAY_FILTER_USE_BOTH);
         ksort($params);
         $content = implode('&', array_map(static fn($key, $value) => $key . '=' . $value, array_keys($params), $params));
         $key = $this->publicPem($this->publicKey);

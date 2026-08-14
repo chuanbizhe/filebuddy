@@ -27,7 +27,10 @@ if (@is_file($ossPath)) require_once $ossPath;
 // FileBuddy PHP 8.1 control plane and public landing page.
 // Credentials must be supplied by environment variables, never by source files.
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
+header('Access-Control-Allow-Headers: Content-Type, Authorization, X-FileBuddy-Key');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: no-referrer');
+header('Cache-Control: no-store');
 if (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'OPTIONS') { http_response_code(204); exit; }
 
 $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
@@ -379,8 +382,9 @@ if ($method === 'POST' && $path === '/v1/billing/alipay/notify') {
     $params = $_POST ?: (json_decode(file_get_contents('php://input') ?: '{}', true) ?: []);
     if (!class_exists('AlipayGateway') || !(new AlipayGateway())->verifyNotification($params)) { http_response_code(400); echo 'fail'; exit; }
     $orderNo = (string)($params['out_trade_no'] ?? ''); $tradeNo = (string)($params['trade_no'] ?? ''); $paidAmount = (float)($params['total_amount'] ?? 0);
+    $tradeStatus = (string)($params['trade_status'] ?? '');
     $statement = $pdo->prepare('SELECT * FROM billing_orders WHERE order_no = ?'); $statement->execute([$orderNo]); $order = $statement->fetch();
-    if (!$order || abs((float)$order['amount'] - $paidAmount) > 0.001) { http_response_code(400); echo 'fail'; exit; }
+    if (!$order || !in_array($tradeStatus, ['TRADE_SUCCESS', 'TRADE_FINISHED'], true) || abs((float)$order['amount'] - $paidAmount) > 0.001) { http_response_code(400); echo 'fail'; exit; }
     if ($order['status'] !== 'paid') {
         $paidAt = gmdate('c');
         $pdo->beginTransaction();
