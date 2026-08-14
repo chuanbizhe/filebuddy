@@ -14,6 +14,7 @@ jobs:
         with:
           php-version: '8.1'
       - run: php -l server/public/index.php
+      - run: php -l server/src/TencentSmsService.php
       - name: Start API and check health
         shell: bash
         run: |
@@ -23,6 +24,19 @@ jobs:
           for i in {1..20}; do curl --fail --silent http://127.0.0.1:8080/health && exit 0; sleep 1; done
           cat /tmp/filebuddy-php.log
           exit 1
+      - name: Smoke-test auth and connection credentials
+        shell: bash
+        run: |
+          email="ci-${GITHUB_RUN_ID}@example.test"
+          register=$(curl --fail --silent -X POST http://127.0.0.1:8080/v1/auth/register -H 'Content-Type: application/json' -d "{\"email\":\"$email\",\"password\":\"TestPassword123\"}")
+          token=$(echo "$register" | jq -r .token)
+          test -n "$token" && test "$token" != "null"
+          workspace=$(curl --fail --silent -X POST http://127.0.0.1:8080/v1/workspaces -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d '{"name":"CI Workspace","permission":"read_write"}')
+          workspace_id=$(echo "$workspace" | jq -r .id)
+          connection=$(curl --fail --silent -X POST "http://127.0.0.1:8080/v1/workspaces/$workspace_id/connections" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d '{}')
+          api_key=$(echo "$connection" | jq -r .apiKey)
+          test "$(echo "$connection" | jq -r .mcpUrl)" = "http://127.0.0.1:8080/mcp/$workspace_id"
+          curl --fail --silent "http://127.0.0.1:8080/v1/bridge/$workspace_id" -H "X-FileBuddy-Key: $api_key" | jq -e '.workspace == "/workspace"' >/dev/null
 
   build:
     strategy:

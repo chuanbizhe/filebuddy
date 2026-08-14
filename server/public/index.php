@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once dirname(__DIR__) . '/src/TencentSmsService.php';
+
 // FileBuddy PHP 8.1 control plane and public landing page.
 // Credentials must be supplied by environment variables, never by source files.
 header('Access-Control-Allow-Origin: *');
@@ -26,9 +28,12 @@ function filebuddyDb(): PDO
     $pdo = new PDO('sqlite:' . $dbPath, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
     $pdo->exec('PRAGMA foreign_keys = ON');
     $pdo->exec('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)');
+    $columns = array_column($pdo->query('PRAGMA table_info(users)')->fetchAll(), 'name');
+    if (!in_array('phone', $columns, true)) $pdo->exec('ALTER TABLE users ADD COLUMN phone TEXT');
     $pdo->exec('CREATE TABLE IF NOT EXISTS tokens (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS workspaces (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, public_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, permission TEXT NOT NULL, allow_delete INTEGER NOT NULL DEFAULT 0, device_status TEXT NOT NULL DEFAULT "online", created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE)');
     $pdo->exec('CREATE TABLE IF NOT EXISTS connection_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, workspace_id INTEGER NOT NULL, key_hash TEXT NOT NULL, created_at TEXT NOT NULL, revoked_at TEXT NULL, FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE)');
+    $pdo->exec('CREATE TABLE IF NOT EXISTS sms_verifications (id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, expires_at TEXT NOT NULL, sent_at TEXT NOT NULL, UNIQUE(phone, purpose))');
     return $pdo;
 }
 
@@ -58,6 +63,25 @@ function filebuddyAuth(PDO $pdo): ?array
 function filebuddyPublicBase(): string
 {
     return rtrim(filebuddyEnv('PUBLIC_BASE_URL', 'http://127.0.0.1:8080'), '/');
+}
+
+function filebuddyPhone(string $phone): string
+{
+    return preg_replace('/\s+/', '', trim($phone));
+}
+
+function filebuddyVerifySms(PDO $pdo, string $phone, string $code, string $purpose, bool $consume = true): bool
+{
+    $statement = $pdo->prepare('SELECT * FROM sms_verifications WHERE phone = ? AND purpose = ?');
+    $statement->execute([$phone, $purpose]);
+    $record = $statement->fetch();
+    if (!$record || strtotime($record['expires_at']) < time() || (int)$record['attempts'] >= 5) return false;
+    if (!password_verify($code, $record['code_hash'])) {
+        $pdo->prepare('UPDATE sms_verifications SET attempts = attempts + 1 WHERE id = ?')->execute([(int)$record['id']]);
+        return false;
+    }
+    if ($consume) $pdo->prepare('DELETE FROM sms_verifications WHERE id = ?')->execute([(int)$record['id']]);
+    return true;
 }
 
 if ($method === 'GET' && $path === '/') {
@@ -94,6 +118,19 @@ $pdo = filebuddyDb();
 
 if ($method === 'POST' && $path === '/v1/auth/register') {
     $body = filebuddyBody();
+    if (!empty($body['phone'])) {
+        $phone = filebuddyPhone((string)$body['phone']);
+        $password = (string)($body['password'] ?? '');
+        if (!preg_match('/^1[3-9]\d{9}$/', $phone) || strlen($password) < 8 || !preg_match('/^\d{6}$/', (string)($body['code'] ?? ''))) $json(['error' => 'phone, 6-digit code and password (8+ chars) are required'], 422);
+        if (!filebuddyVerifySms($pdo, $phone, (string)$body['code'], 'register')) $json(['error' => 'invalid_or_expired_code'], 422);
+        $exists = $pdo->prepare('SELECT id FROM users WHERE phone = ? OR email = ?');
+        $exists->execute([$phone, $phone]);
+        if ($exists->fetch()) $json(['error' => 'phone_already_registered'], 409);
+        $statement = $pdo->prepare('INSERT INTO users (email, phone, password_hash, created_at) VALUES (?, ?, ?, ?)');
+        $statement->execute([$phone, $phone, password_hash($password, PASSWORD_DEFAULT), gmdate('c')]);
+        $userId = (int)$pdo->lastInsertId();
+        $json(['user' => ['id' => $userId, 'phone' => $phone], 'token' => filebuddyToken($pdo, $userId)]);
+    }
     $email = strtolower(trim((string)($body['email'] ?? '')));
     $password = (string)($body['password'] ?? '');
     if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) $json(['error' => 'valid email and password (8+ chars) are required'], 422);
@@ -109,16 +146,51 @@ if ($method === 'POST' && $path === '/v1/auth/register') {
 }
 if ($method === 'POST' && $path === '/v1/auth/login') {
     $body = filebuddyBody();
+    if (!empty($body['phone'])) {
+        $phone = filebuddyPhone((string)$body['phone']);
+        $statement = $pdo->prepare('SELECT * FROM users WHERE phone = ? OR email = ?');
+        $statement->execute([$phone, $phone]);
+        $user = $statement->fetch();
+        if (!$user || !password_verify((string)($body['password'] ?? ''), $user['password_hash'])) $json(['error' => 'invalid_credentials'], 401);
+        $json(['user' => ['id' => (int)$user['id'], 'phone' => $user['phone'] ?: $user['email']], 'token' => filebuddyToken($pdo, (int)$user['id'])]);
+    }
     $statement = $pdo->prepare('SELECT * FROM users WHERE email = ?');
     $statement->execute([strtolower(trim((string)($body['email'] ?? '')))]);
     $user = $statement->fetch();
     if (!$user || !password_verify((string)($body['password'] ?? ''), $user['password_hash'])) $json(['error' => 'invalid_credentials'], 401);
     $json(['user' => ['id' => (int)$user['id'], 'email' => $user['email']], 'token' => filebuddyToken($pdo, (int)$user['id'])]);
 }
+if ($method === 'POST' && $path === '/v1/auth/send-code') {
+    $body = filebuddyBody();
+    $phone = filebuddyPhone((string)($body['phone'] ?? ''));
+    $purpose = in_array(($body['purpose'] ?? 'login'), ['login', 'register'], true) ? (string)$body['purpose'] : 'login';
+    if (!preg_match('/^1[3-9]\d{9}$/', $phone)) $json(['error' => 'invalid_phone'], 422);
+    $recent = $pdo->prepare('SELECT sent_at FROM sms_verifications WHERE phone = ? AND purpose = ?');
+    $recent->execute([$phone, $purpose]);
+    $lastSent = $recent->fetchColumn();
+    if ($lastSent && time() - strtotime($lastSent) < 60) $json(['error' => 'too_many_requests', 'retryAfter' => 60 - (time() - strtotime($lastSent))], 429);
+    $code = str_pad((string)random_int(0, 999999), 6, '0', STR_PAD_LEFT);
+    $sms = (new TencentSmsService())->send($phone, $code);
+    if (!$sms['success']) $json(['error' => $sms['message']], 503);
+    $statement = $pdo->prepare('INSERT INTO sms_verifications (phone, purpose, code_hash, expires_at, sent_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(phone, purpose) DO UPDATE SET code_hash = excluded.code_hash, attempts = 0, expires_at = excluded.expires_at, sent_at = excluded.sent_at');
+    $statement->execute([$phone, $purpose, password_hash($code, PASSWORD_DEFAULT), gmdate('c', time() + 600), gmdate('c')]);
+    $json(['success' => true, 'message' => '验证码已发送', 'expiresIn' => 600]);
+}
+if ($method === 'POST' && $path === '/v1/auth/login-code') {
+    $body = filebuddyBody();
+    $phone = filebuddyPhone((string)($body['phone'] ?? ''));
+    $code = (string)($body['code'] ?? '');
+    if (!preg_match('/^1[3-9]\d{9}$/', $phone) || !preg_match('/^\d{6}$/', $code) || !filebuddyVerifySms($pdo, $phone, $code, 'login')) $json(['error' => 'invalid_or_expired_code'], 401);
+    $statement = $pdo->prepare('SELECT * FROM users WHERE phone = ? OR email = ?');
+    $statement->execute([$phone, $phone]);
+    $user = $statement->fetch();
+    if (!$user) $json(['error' => 'phone_not_registered'], 404);
+    $json(['user' => ['id' => (int)$user['id'], 'phone' => $user['phone'] ?: $user['email']], 'token' => filebuddyToken($pdo, (int)$user['id'])]);
+}
 if ($method === 'GET' && $path === '/v1/me') {
     $user = filebuddyAuth($pdo);
     if (!$user) $json(['error' => 'unauthorized'], 401);
-    $json(['id' => (int)$user['id'], 'email' => $user['email']]);
+    $json(['id' => (int)$user['id'], 'email' => $user['email'], 'phone' => $user['phone'] ?? null]);
 }
 if ($method === 'GET' && $path === '/v1/workspaces') {
     $user = filebuddyAuth($pdo);
